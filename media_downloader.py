@@ -5,6 +5,7 @@ import logging
 import os
 import random
 import re
+import shutil
 from datetime import date, datetime, timezone
 from typing import List, Optional, Tuple, Union
 
@@ -124,6 +125,44 @@ def _is_exist(file_path: str) -> bool:
     return not os.path.isdir(file_path) and os.path.exists(file_path)
 
 
+def _check_disk_space(
+    target_path: Optional[str] = None, min_free_gb: float = 15.0
+) -> bool:
+    """
+    Check if available disk space is at least min_free_gb.
+
+    Parameters
+    ----------
+    target_path: Optional[str]
+        Directory path to check, or None for current directory.
+    min_free_gb: float
+        Minimum free gigabytes required (default: 15.0).
+
+    Returns
+    -------
+    bool
+        True if free space >= min_free_gb, False otherwise.
+    """
+    check_dir = (
+        target_path if (target_path and os.path.exists(target_path)) else THIS_DIR
+    )
+    try:
+        free_bytes = shutil.disk_usage(check_dir).free
+        free_gb = free_bytes / (1024**3)
+        if free_gb < min_free_gb:
+            logger.warning(
+                "Disk space critical: only %.2f GB remaining on %s (minimum required: %.2f GB). "
+                "Pausing downloads to protect disk storage.",
+                free_gb,
+                check_dir,
+                min_free_gb,
+            )
+            return False
+    except OSError as e:
+        logger.warning("Could not check disk usage on %s: %s", check_dir, e)
+    return True
+
+
 def _progress_callback(current: int, total: int, pbar: tqdm) -> None:
     """
     Update progress bar for file downloads.
@@ -239,6 +278,7 @@ async def download_media(  # pylint: disable=too-many-locals,too-many-branches,t
     file_formats: dict,
     chat_id: Union[int, str],
     download_directory: Optional[str] = None,
+    min_disk_free_gb: float = 15.0,
 ):
     """
     Download media from Telegram.
@@ -293,8 +333,30 @@ async def download_media(  # pylint: disable=too-many-locals,too-many-branches,t
                 display_name = getattr(
                     media_obj, "file_name", os.path.basename(file_name)
                 )
+                base_name = os.path.basename(file_name)
+
+                # Pre-download check: Check if in archive or previous download history
+                if db.is_archived_or_downloaded(display_name, file_size) or (
+                    base_name != display_name
+                    and db.is_archived_or_downloaded(base_name, file_size)
+                ):
+                    logger.info(
+                        "File %s (%d bytes) already archived or downloaded. Skipping download.",
+                        display_name,
+                        file_size,
+                    )
+                    PROCESSED_IDS[chat_id].append(message.id)
+                    return message.id
+
                 desc = f"Downloading {display_name}"
                 logger.info(desc)
+
+                if not _check_disk_space(download_directory, min_disk_free_gb):
+                    logger.warning(
+                        "Skipping download of %s due to low disk space.", display_name
+                    )
+                    FAILED_IDS[chat_id].append(message.id)
+                    return message.id
 
                 if _is_exist(file_name):
                     file_name = get_next_name(file_name)
@@ -403,6 +465,7 @@ async def process_messages(  # pylint: disable=too-many-positional-arguments
     download_directory: Optional[str] = None,
     max_concurrent_downloads: int = 4,
     download_delay: Optional[Union[float, List[float]]] = None,
+    min_disk_free_gb: float = 15.0,
 ) -> int:
     """
     Download media from Telegram.
@@ -476,6 +539,7 @@ async def process_messages(  # pylint: disable=too-many-positional-arguments
                     file_formats,
                     chat_id,
                     download_directory,
+                    min_disk_free_gb,
                 )
             )
 
@@ -580,6 +644,10 @@ async def process_chat(  # pylint: disable=too-many-locals,too-many-branches,too
     else:
         download_directory = None
 
+    min_disk_free_gb = float(
+        chat_conf.get("min_disk_free_gb", global_config.get("min_disk_free_gb", 15.0))
+    )
+
     messages_iter = client.iter_messages(
         chat_id, min_id=last_read_message_id, reverse=True
     )
@@ -597,6 +665,11 @@ async def process_chat(  # pylint: disable=too-many-locals,too-many-branches,too
             messages_list.append(message)
 
     async for message in messages_iter:  # type: ignore
+        if not _check_disk_space(download_directory, min_disk_free_gb):
+            logger.warning(
+                "Disk space critical for chat %s. Stopping chat processing.", chat_id
+            )
+            break
         if end_date and message.date > end_date:
             continue
         if start_date and message.date < start_date:
@@ -615,6 +688,7 @@ async def process_chat(  # pylint: disable=too-many-locals,too-many-branches,too
                 download_directory,
                 max_concurrent_downloads,
                 download_delay,
+                min_disk_free_gb,
             )
             # Memory cleanup for next batch
             CURRENT_BATCH_IDS[chat_id] = []
@@ -643,6 +717,7 @@ async def process_chat(  # pylint: disable=too-many-locals,too-many-branches,too
             download_directory,
             max_concurrent_downloads,
             download_delay,
+            min_disk_free_gb,
         )
         CURRENT_BATCH_IDS[chat_id] = []
         PROCESSED_IDS[chat_id] = []
@@ -709,6 +784,15 @@ async def begin_import(  # pylint: disable=too-many-locals,too-many-branches,too
     else:
         chats_to_process = chats_config
 
+    min_disk_free_gb = float(config.get("min_disk_free_gb", 15.0))
+    if not _check_disk_space(None, min_disk_free_gb):
+        logger.warning(
+            "Free disk space is below %.2f GB globally. Halting import across all chats.",
+            min_disk_free_gb,
+        )
+        await client.disconnect()
+        return config
+
     parallel_chats = config.get("parallel_chats", False)
     config_write_lock = asyncio.Lock()
 
@@ -722,6 +806,13 @@ async def begin_import(  # pylint: disable=too-many-locals,too-many-branches,too
     else:
         logger.info("Processing chats sequentially...")
         for chat_conf in chats_to_process:
+            if not _check_disk_space(None, min_disk_free_gb):
+                logger.warning(
+                    "Disk space critical (< %.2f GB). Stopping before starting next chat %s.",
+                    min_disk_free_gb,
+                    chat_conf.get("chat_id"),
+                )
+                break
             await process_chat(
                 client, config, chat_conf, pagination_limit, config_write_lock
             )

@@ -1605,6 +1605,64 @@ class MediaDownloaderTestCase(unittest.TestCase):
         captured_callback(50, 100)
         mock_pbar.update.assert_called_with(50)
 
+    @mock.patch("db.is_archived_or_downloaded", return_value=True)
+    def test_download_media_skips_when_archived(self, mock_archived):
+        """Test that download_media skips downloading when file is already archived."""
+        mock_client = MockClient()
+        mock_download = mock.AsyncMock()
+        mock_client.download_media = mock_download
+        message = MockMessage(
+            id=99,
+            media=True,
+            video=MockVideo(
+                file_name="already_archived.mp4",
+                mime_type="video/mp4",
+                size=50000,
+            ),
+        )
+        result = self.loop.run_until_complete(
+            async_download_media(mock_client, message, ["video"], {"video": ["all"]})
+        )
+        self.assertEqual(result, 99)
+        mock_download.assert_not_called()
+
+    @mock.patch("shutil.disk_usage")
+    def test_check_disk_space(self, mock_disk_usage):
+        """Test _check_disk_space with sufficient and low disk space."""
+        from media_downloader import _check_disk_space
+        from collections import namedtuple
+        Usage = namedtuple("Usage", ["total", "used", "free"])
+
+        # Sufficient disk space: 30 GB free, threshold 15 GB
+        mock_disk_usage.return_value = Usage(100 * 1024**3, 70 * 1024**3, 30 * 1024**3)
+        self.assertTrue(_check_disk_space(min_free_gb=15.0))
+
+        # Low disk space: 5 GB free, threshold 15 GB
+        mock_disk_usage.return_value = Usage(100 * 1024**3, 95 * 1024**3, 5 * 1024**3)
+        self.assertFalse(_check_disk_space(min_free_gb=15.0))
+
+    @mock.patch("media_downloader._check_disk_space", return_value=False)
+    @mock.patch("db.is_archived_or_downloaded", return_value=False)
+    def test_download_media_skips_when_disk_space_low(self, mock_archived, mock_disk):
+        """Test download_media skips when disk space is critically low."""
+        mock_client = MockClient()
+        mock_download = mock.AsyncMock()
+        mock_client.download_media = mock_download
+        message = MockMessage(
+            id=101,
+            media=True,
+            video=MockVideo(
+                file_name="large_video.mp4",
+                mime_type="video/mp4",
+                size=100000,
+            ),
+        )
+        result = self.loop.run_until_complete(
+            async_download_media(mock_client, message, ["video"], {"video": ["all"]})
+        )
+        self.assertEqual(result, 101)
+        mock_download.assert_not_called()
+
     @classmethod
     def tearDownClass(cls):
         cls.loop.close()

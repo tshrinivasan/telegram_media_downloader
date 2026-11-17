@@ -48,6 +48,28 @@ def init_db():
             cursor.execute(
                 "CREATE INDEX IF NOT EXISTS idx_timestamp ON download_history(download_timestamp DESC)"
             )
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_history_name_size ON download_history(file_name, file_size)"
+            )
+
+            # Create table for pre-populated remote archive files
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS archived_files (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    file_name TEXT NOT NULL,
+                    file_size INTEGER NOT NULL,
+                    path TEXT,
+                    UNIQUE(file_name, file_size)
+                )
+            """
+            )
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_archived_name_size ON archived_files(file_name, file_size)"
+            )
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_archived_name ON archived_files(file_name)"
+            )
             conn.commit()
         _db_initialized = True
     except Exception as e:
@@ -98,6 +120,91 @@ def reset_history():
     except Exception as e:
         logger = logging.getLogger("media_downloader")
         logger.error(f"Failed to reset download history: {e}")
+
+
+def is_archived_or_downloaded(
+    file_name: str, file_size: Optional[int] = None
+) -> bool:
+    """Check if a file with the given name and size exists in archive or download history."""
+    _ensure_db()
+    try:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            if file_size is not None and file_size > 0:
+                cursor.execute(
+                    "SELECT 1 FROM archived_files WHERE file_name = ? AND file_size = ? LIMIT 1",
+                    (file_name, file_size),
+                )
+                if cursor.fetchone():
+                    return True
+                cursor.execute(
+                    "SELECT 1 FROM download_history WHERE file_name = ? AND file_size = ? LIMIT 1",
+                    (file_name, file_size),
+                )
+                if cursor.fetchone():
+                    return True
+            else:
+                cursor.execute(
+                    "SELECT 1 FROM archived_files WHERE file_name = ? LIMIT 1",
+                    (file_name,),
+                )
+                if cursor.fetchone():
+                    return True
+                cursor.execute(
+                    "SELECT 1 FROM download_history WHERE file_name = ? LIMIT 1",
+                    (file_name,),
+                )
+                if cursor.fetchone():
+                    return True
+    except Exception as e:
+        logger = logging.getLogger("media_downloader")
+        logger.error(f"Failed to check archive status for {file_name}: {e}")
+    return False
+
+
+def import_archived_files_from_tsv(tsv_path: str) -> int:
+    """Import records from a tab-separated file (size, name, path) into archived_files."""
+    _ensure_db()
+    inserted_count = 0
+    try:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            batch = []
+            with open(tsv_path, "r", encoding="utf-8", errors="ignore") as f:
+                for line in f:
+                    parts = line.strip().split("\t")
+                    if len(parts) >= 2:
+                        try:
+                            size = int(parts[0])
+                            name = parts[1]
+                            path = parts[2] if len(parts) > 2 else ""
+                            batch.append((name, size, path))
+                            if len(batch) >= 5000:
+                                cursor.executemany(
+                                    """
+                                    INSERT OR IGNORE INTO archived_files (file_name, file_size, path)
+                                    VALUES (?, ?, ?)
+                                """,
+                                    batch,
+                                )
+                                inserted_count += len(batch)
+                                batch = []
+                        except ValueError:
+                            continue
+                if batch:
+                    cursor.executemany(
+                        """
+                        INSERT OR IGNORE INTO archived_files (file_name, file_size, path)
+                        VALUES (?, ?, ?)
+                    """,
+                        batch,
+                    )
+                    inserted_count += len(batch)
+            conn.commit()
+    except Exception as e:
+        logger = logging.getLogger("media_downloader")
+        logger.error(f"Failed to import TSV into archived_files: {e}")
+    return inserted_count
 
 
 def get_recent_downloads(

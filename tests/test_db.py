@@ -137,6 +137,34 @@ class TestDB(unittest.TestCase):
         records, _ = db.get_recent_downloads(limit=3, offset=9)
         self.assertEqual(len(records), 1)
 
+    def test_is_archived_or_downloaded_from_history(self):
+        """Verify is_archived_or_downloaded checks download_history."""
+        self.assertFalse(db.is_archived_or_downloaded("doc.pdf", 1234))
+        db.record_download("chat1", 10, "doc.pdf", 1234)
+        self.assertTrue(db.is_archived_or_downloaded("doc.pdf", 1234))
+        self.assertTrue(db.is_archived_or_downloaded("doc.pdf"))
+        self.assertFalse(db.is_archived_or_downloaded("doc.pdf", 9999))
+        self.assertFalse(db.is_archived_or_downloaded("other.pdf", 1234))
+
+    def test_import_archived_files_from_tsv_and_lookup(self):
+        """Verify TSV import into archived_files and lookup."""
+        tsv_file = tempfile.NamedTemporaryFile(mode="w+", delete=False, suffix=".tsv")
+        try:
+            tsv_file.write("54321\tpaper.pdf\t/remote/path/paper.pdf\n")
+            tsv_file.write("1000\tbook.epub\t/remote/path/book.epub\n")
+            tsv_file.write("invalid_line\n")
+            tsv_file.close()
+
+            imported = db.import_archived_files_from_tsv(tsv_file.name)
+            self.assertEqual(imported, 2)
+            self.assertTrue(db.is_archived_or_downloaded("paper.pdf", 54321))
+            self.assertTrue(db.is_archived_or_downloaded("book.epub", 1000))
+            self.assertFalse(db.is_archived_or_downloaded("paper.pdf", 9999))
+            self.assertFalse(db.is_archived_or_downloaded("missing.pdf", 54321))
+        finally:
+            if os.path.exists(tsv_file.name):
+                os.remove(tsv_file.name)
+
 
 if __name__ == "__main__":
     unittest.main()
