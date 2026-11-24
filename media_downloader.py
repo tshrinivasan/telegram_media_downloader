@@ -1,8 +1,10 @@
 """Downloads media from telegram."""
 
 import asyncio
+import glob
 import logging
 import os
+import pathlib
 import random
 import re
 import shutil
@@ -348,6 +350,57 @@ async def download_media(  # pylint: disable=too-many-locals,too-many-branches,t
                     PROCESSED_IDS[chat_id].append(message.id)
                     return message.id
 
+                # Pre-download local disk check: check if already downloaded on disk or any copy matches size
+                posix_path = pathlib.Path(file_name)
+                base_stem = re.sub(r"-copy\d+$", "", posix_path.stem)
+                parent_dir = posix_path.parent
+                ext = "".join(posix_path.suffixes)
+                pattern = re.compile(rf"^{re.escape(base_stem)}(-copy\d+)?{re.escape(ext)}$")
+                already_exists_locally = False
+                matched_local_name = None
+
+                if parent_dir.is_dir() and file_size > 0:
+                    try:
+                        for entry in os.scandir(parent_dir):
+                            if entry.is_file() and pattern.match(entry.name):
+                                try:
+                                    entry_sz = entry.stat().st_size
+                                    if entry_sz == file_size:
+                                        already_exists_locally = True
+                                        matched_local_name = entry.name
+                                        break
+                                    elif entry_sz == 0:
+                                        try:
+                                            os.remove(entry.path)
+                                            logger.info(
+                                                "Cleaned up broken 0-byte file: %s", entry.name
+                                            )
+                                        except OSError:
+                                            pass
+                                except OSError:
+                                    pass
+                    except OSError:
+                        pass
+
+                if already_exists_locally and matched_local_name:
+                    logger.info(
+                        "File %s (%d bytes) already exists locally on disk as %s. Skipping download.",
+                        display_name,
+                        file_size,
+                        matched_local_name,
+                    )
+                    abs_local_path = os.path.join(str(parent_dir), matched_local_name)
+                    db.record_download(
+                        str(chat_id),
+                        message.id,
+                        matched_local_name,
+                        file_size,
+                        abs_local_path,
+                        _type,
+                    )
+                    PROCESSED_IDS[chat_id].append(message.id)
+                    return message.id
+
                 desc = f"Downloading {display_name}"
                 logger.info(desc)
 
@@ -359,7 +412,13 @@ async def download_media(  # pylint: disable=too-many-locals,too-many-branches,t
                     return message.id
 
                 if _is_exist(file_name):
-                    file_name = get_next_name(file_name)
+                    if os.path.isfile(file_name) and os.path.getsize(file_name) == 0:
+                        try:
+                            os.remove(file_name)
+                        except OSError:
+                            pass
+                    if _is_exist(file_name):
+                        file_name = get_next_name(file_name)
                     with tqdm(
                         total=file_size, unit="B", unit_scale=True, desc=desc
                     ) as pbar:
@@ -451,6 +510,14 @@ async def download_media(  # pylint: disable=too-many-locals,too-many-branches,t
                 e,
                 exc_info=True,
             )
+            if file_name and os.path.isfile(file_name):
+                try:
+                    current_sz = os.path.getsize(file_name)
+                    if current_sz == 0 or (file_size > 0 and current_sz < file_size):
+                        os.remove(file_name)
+                        logger.info("Cleaned up incomplete file: %s", file_name)
+                except OSError:
+                    pass
             FAILED_IDS[chat_id].append(message.id)
             break
     return message.id

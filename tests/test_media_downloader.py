@@ -1,9 +1,11 @@
 """Unittest module for media downloader."""
 
 import asyncio
+from collections import namedtuple
 import copy
 import os
 import platform
+import tempfile
 import unittest
 from datetime import datetime, timezone
 from unittest import mock
@@ -121,6 +123,7 @@ class MockDocument:
     def __init__(self, **kwargs):
         self.file_name = kwargs.get("file_name", "test.pdf")
         self.mime_type = kwargs["mime_type"]
+        self.size = kwargs.get("size", 1024)
         self.id = 123
         self.attributes = kwargs.get(
             "attributes", [mock.Mock(file_name=self.file_name)]
@@ -325,8 +328,15 @@ class MediaDownloaderTestCase(unittest.TestCase):
         # Prevent tests from writing to the real SQLite database
         self._db_record_patcher = mock.patch("media_downloader.db.record_download")
         self._db_record_patcher.start()
+        Usage = namedtuple("Usage", ["total", "used", "free"])
+        self._disk_usage_patcher = mock.patch(
+            "media_downloader.shutil.disk_usage",
+            return_value=Usage(100 * 1024**3, 50 * 1024**3, 50 * 1024**3),
+        )
+        self._disk_usage_patcher.start()
 
     def tearDown(self):
+        self._disk_usage_patcher.stop()
         self._db_record_patcher.stop()
 
     @mock.patch("media_downloader.THIS_DIR", new=MOCK_DIR)
@@ -1626,11 +1636,10 @@ class MediaDownloaderTestCase(unittest.TestCase):
         self.assertEqual(result, 99)
         mock_download.assert_not_called()
 
-    @mock.patch("shutil.disk_usage")
+    @mock.patch("media_downloader.shutil.disk_usage")
     def test_check_disk_space(self, mock_disk_usage):
         """Test _check_disk_space with sufficient and low disk space."""
         from media_downloader import _check_disk_space
-        from collections import namedtuple
         Usage = namedtuple("Usage", ["total", "used", "free"])
 
         # Sufficient disk space: 30 GB free, threshold 15 GB
@@ -1662,6 +1671,159 @@ class MediaDownloaderTestCase(unittest.TestCase):
         )
         self.assertEqual(result, 101)
         mock_download.assert_not_called()
+
+    @mock.patch("db.is_archived_or_downloaded", return_value=False)
+    def test_download_media_skips_when_matching_file_exists_locally(self, mock_archived):
+        """Test download_media skips without downloading if a file with identical size exists locally."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            doc_dir = os.path.join(tmp_dir, "document")
+            os.makedirs(doc_dir, exist_ok=True)
+            existing_file = os.path.join(doc_dir, "test_book.pdf")
+            with open(existing_file, "wb") as f:
+                f.write(b"x" * 500)
+
+            mock_client = MockClient()
+            mock_download = mock.AsyncMock()
+            mock_client.download_media = mock_download
+            message = MockMessage(
+                id=201,
+                media=True,
+                document=MockDocument(
+                    file_name="test_book.pdf",
+                    mime_type="application/pdf",
+                    size=500,
+                ),
+            )
+            result = self.loop.run_until_complete(
+                download_media(
+                    mock_client,
+                    message,
+                    ["document"],
+                    {"document": ["all"]},
+                    chat_id="test_chat",
+                    download_directory=tmp_dir,
+                )
+            )
+            self.assertEqual(result, 201)
+            mock_download.assert_not_called()
+
+    @mock.patch("db.is_archived_or_downloaded", return_value=False)
+    def test_download_media_skips_when_matching_copy_exists_locally(self, mock_archived):
+        """Test download_media skips if a sibling copy file exists locally with matching size."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            doc_dir = os.path.join(tmp_dir, "document")
+            os.makedirs(doc_dir, exist_ok=True)
+            copy_file = os.path.join(doc_dir, "test_book-copy1.pdf")
+            with open(copy_file, "wb") as f:
+                f.write(b"y" * 800)
+
+            mock_client = MockClient()
+            mock_download = mock.AsyncMock()
+            mock_client.download_media = mock_download
+            message = MockMessage(
+                id=202,
+                media=True,
+                document=MockDocument(
+                    file_name="test_book.pdf",
+                    mime_type="application/pdf",
+                    size=800,
+                ),
+            )
+            result = self.loop.run_until_complete(
+                download_media(
+                    mock_client,
+                    message,
+                    ["document"],
+                    {"document": ["all"]},
+                    chat_id="test_chat",
+                    download_directory=tmp_dir,
+                )
+            )
+            self.assertEqual(result, 202)
+            mock_download.assert_not_called()
+
+    @mock.patch("db.is_archived_or_downloaded", return_value=False)
+    def test_download_media_cleans_0_byte_stub_and_downloads_canonical(self, mock_archived):
+        """Test download_media removes 0-byte corrupt stub and downloads to original filename."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            doc_dir = os.path.join(tmp_dir, "document")
+            os.makedirs(doc_dir, exist_ok=True)
+            stub_file = os.path.join(doc_dir, "broken.pdf")
+            with open(stub_file, "wb") as f:
+                pass  # 0 bytes
+
+            mock_client = MockClient()
+            target_path = os.path.join(doc_dir, "broken.pdf")
+
+            async def fake_download(msg, file, progress_callback=None):
+                with open(file, "wb") as f:
+                    f.write(b"completed content")
+                return file
+
+            mock_client.download_media = mock.AsyncMock(side_effect=fake_download)
+            message = MockMessage(
+                id=203,
+                media=True,
+                document=MockDocument(
+                    file_name="broken.pdf",
+                    mime_type="application/pdf",
+                    size=17,
+                ),
+            )
+            result = self.loop.run_until_complete(
+                download_media(
+                    mock_client,
+                    message,
+                    ["document"],
+                    {"document": ["all"]},
+                    chat_id="test_chat",
+                    download_directory=tmp_dir,
+                )
+            )
+            self.assertEqual(result, 203)
+            # The download was saved to original broken.pdf, NOT broken-copy1.pdf
+            self.assertTrue(os.path.isfile(target_path))
+            self.assertFalse(os.path.isfile(os.path.join(doc_dir, "broken-copy1.pdf")))
+            self.assertEqual(os.path.getsize(target_path), 17)
+
+    @mock.patch("db.is_archived_or_downloaded", return_value=False)
+    def test_download_media_cleans_incomplete_file_on_exception(self, mock_archived):
+        """Test download_media removes partial/incomplete file if an exception occurs during download."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            doc_dir = os.path.join(tmp_dir, "document")
+            os.makedirs(doc_dir, exist_ok=True)
+            mock_client = MockClient()
+            target_path = os.path.join(doc_dir, "aborted.pdf")
+
+            async def failing_download(msg, file, progress_callback=None):
+                # Write partial file then raise network error
+                with open(file, "wb") as f:
+                    f.write(b"partial content")
+                raise ConnectionError("Network lost mid-download")
+
+            mock_client.download_media = mock.AsyncMock(side_effect=failing_download)
+            message = MockMessage(
+                id=204,
+                media=True,
+                document=MockDocument(
+                    file_name="aborted.pdf",
+                    mime_type="application/pdf",
+                    size=5000,
+                ),
+            )
+            result = self.loop.run_until_complete(
+                download_media(
+                    mock_client,
+                    message,
+                    ["document"],
+                    {"document": ["all"]},
+                    chat_id="test_chat",
+                    download_directory=tmp_dir,
+                )
+            )
+            self.assertEqual(result, 204)
+            # The incomplete file must have been deleted so it doesn't cause -copy1 next time
+            self.assertFalse(os.path.exists(target_path))
 
     @classmethod
     def tearDownClass(cls):

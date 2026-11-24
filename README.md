@@ -28,6 +28,14 @@ A meta of last read/downloaded message is stored in the config file so that in s
 |Language | `Python 3.8 ` and above|
 |Download media types|  audio, document, photo, video, video_note, voice|
 
+## 📚 Digital Preservation & Metadata Catalog
+
+This repository includes specialized tools developed for large-scale digital cultural preservation (contemporary Tamil newspapers, books, and magazines):
+
+* **[Private Archive & Metadata Catalog Guide](docs/PRIVATE_ARCHIVE_AND_CATALOG.md)**: Details on the Two-Tier architecture (Private Dark Archive + Public Metadata Catalog), web leak prevention, and Dublin Core bibliographic standards.
+* **[Remote Storage Cost & Architecture Guide](server-pricing.md)**: Comprehensive comparison of storage costs (InterServer, Hetzner Storage Box, ServaRICA, AWS S3 Glacier Deep Archive) and scaling roadmaps from 2 TB to 50 TB+.
+* **`build_catalog.py`**: High-performance extraction pipeline that cleans filenames, parses dates and publications, builds an SQLite FTS5 search index, and exports `catalog_data.json` (95,919 reading assets) and `catalog_preview.html`.
+
 ## 🎉 Version 3.4.0 - Interactive Web UI
 
 ### What's New:
