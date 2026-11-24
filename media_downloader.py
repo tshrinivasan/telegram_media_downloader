@@ -700,16 +700,30 @@ async def process_chat(  # pylint: disable=too-many-locals,too-many-branches,too
     else:
         max_messages = None
 
-    download_directory_val = chat_conf.get(
-        "download_directory", global_config.get("download_directory")
-    )
-    if isinstance(download_directory_val, str) and download_directory_val.strip():
-        download_directory = download_directory_val.strip()
-        if not os.path.isabs(download_directory):
-            download_directory = os.path.abspath(download_directory)
-        os.makedirs(download_directory, exist_ok=True)
+    # Determine the root downloads directory:
+    # If global_config specifies download_directory, use it; otherwise default to "all_downloads" subfolder.
+    global_dir_val = global_config.get("download_directory")
+    if isinstance(global_dir_val, str) and global_dir_val.strip():
+        root_download_dir = global_dir_val.strip()
+        if not os.path.isabs(root_download_dir):
+            root_download_dir = os.path.abspath(os.path.join(THIS_DIR, root_download_dir))
     else:
-        download_directory = None
+        root_download_dir = os.path.abspath(os.path.join(THIS_DIR, "all_downloads"))
+
+    chat_dir_val = chat_conf.get("download_directory")
+    if isinstance(chat_dir_val, str) and chat_dir_val.strip():
+        chat_dir = chat_dir_val.strip()
+        if os.path.isabs(chat_dir):
+            download_directory = chat_dir
+        else:
+            download_directory = os.path.join(root_download_dir, chat_dir)
+    else:
+        download_directory = os.path.join(root_download_dir, str(chat_id))
+
+    try:
+        os.makedirs(download_directory, exist_ok=True)
+    except OSError:
+        pass
 
     min_disk_free_gb = float(
         chat_conf.get("min_disk_free_gb", global_config.get("min_disk_free_gb", 15.0))

@@ -5,6 +5,7 @@ from collections import namedtuple
 import copy
 import os
 import platform
+import shutil
 import tempfile
 import unittest
 from datetime import datetime, timezone
@@ -21,6 +22,7 @@ from telethon.tl.types import (
     MessageMediaPhoto,
 )
 
+import media_downloader
 from media_downloader import (
     _can_download,
     _get_media_meta,
@@ -30,6 +32,7 @@ from media_downloader import (
     download_media,
     get_media_type,
     main,
+    process_chat,
     process_messages,
     update_config,
 )
@@ -338,6 +341,14 @@ class MediaDownloaderTestCase(unittest.TestCase):
     def tearDown(self):
         self._disk_usage_patcher.stop()
         self._db_record_patcher.stop()
+        # Clean up test directories created during test runs
+        for test_name in ["8654123", "custom_downloads"]:
+            p = os.path.join(media_downloader.THIS_DIR, "all_downloads", test_name)
+            if os.path.isdir(p):
+                shutil.rmtree(p, ignore_errors=True)
+            p_root = os.path.join(media_downloader.THIS_DIR, test_name)
+            if os.path.isdir(p_root):
+                shutil.rmtree(p_root, ignore_errors=True)
 
     @mock.patch("media_downloader.THIS_DIR", new=MOCK_DIR)
     def test_get_media_meta(self):
@@ -1142,31 +1153,32 @@ class MediaDownloaderTestCase(unittest.TestCase):
     @mock.patch("media_downloader.process_messages", return_value=1234)
     def test_process_chat_edge_cases(self, mock_process_messages, mock_update_config):
         client = MockClient()
-        conf = {"api_id": 1, "api_hash": "a"}
-        chat_conf = {"chat_id": 111, "max_messages": 0}
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            conf = {"api_id": 1, "api_hash": "a", "download_directory": tmp_dir}
+            chat_conf = {"chat_id": 111, "max_messages": 0}
 
-        import asyncio
+            import asyncio
 
-        import media_downloader
+            import media_downloader
 
-        media_downloader.DOWNLOADED_IDS[111] = [123]
+            media_downloader.DOWNLOADED_IDS[111] = [123]
 
-        self.loop.run_until_complete(
-            media_downloader.process_chat(client, conf, chat_conf, 1, asyncio.Lock())
-        )
-        self.assertEqual(chat_conf.get("last_read_message_id"), 1234)
-        # update_config should have been called (checkpoint write)
-        mock_update_config.assert_called()
+            self.loop.run_until_complete(
+                process_chat(client, conf, chat_conf, 1, asyncio.Lock())
+            )
+            self.assertEqual(chat_conf.get("last_read_message_id"), 1234)
+            # update_config should have been called (checkpoint write)
+            mock_update_config.assert_called()
 
-        chat_conf = {
-            "chat_id": 222,
-            "start_date": "2050-01-01",
-            "end_date": datetime(2050, 12, 31).date(),
-        }
-        media_downloader.DOWNLOADED_IDS[222] = []
-        self.loop.run_until_complete(
-            media_downloader.process_chat(client, conf, chat_conf, 1, asyncio.Lock())
-        )
+            chat_conf = {
+                "chat_id": 222,
+                "start_date": "2050-01-01",
+                "end_date": datetime(2050, 12, 31).date(),
+            }
+            media_downloader.DOWNLOADED_IDS[222] = []
+            self.loop.run_until_complete(
+                process_chat(client, conf, chat_conf, 1, asyncio.Lock())
+            )
 
     @mock.patch("media_downloader.update_config", return_value=None)
     @mock.patch("media_downloader.process_messages", return_value=1234)
@@ -1179,17 +1191,18 @@ class MediaDownloaderTestCase(unittest.TestCase):
         import media_downloader
 
         client = MockClient()
-        conf = {"api_id": 1, "api_hash": "a"}
-        # max_messages=1, DOWNLOADED_IDS already has 1 entry so the break
-        # fires immediately after the first batch is processed.
-        chat_conf = {"chat_id": 333, "max_messages": 1}
-        media_downloader.DOWNLOADED_IDS[333] = [99]
-        media_downloader.FAILED_IDS[333] = []
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            conf = {"api_id": 1, "api_hash": "a", "download_directory": tmp_dir}
+            # max_messages=1, DOWNLOADED_IDS already has 1 entry so the break
+            # fires immediately after the first batch is processed.
+            chat_conf = {"chat_id": 333, "max_messages": 1}
+            media_downloader.DOWNLOADED_IDS[333] = [99]
+            media_downloader.FAILED_IDS[333] = []
 
-        self.loop.run_until_complete(
-            media_downloader.process_chat(client, conf, chat_conf, 1, asyncio.Lock())
-        )
-        mock_update_config.assert_called()
+            self.loop.run_until_complete(
+                process_chat(client, conf, chat_conf, 1, asyncio.Lock())
+            )
+            mock_update_config.assert_called()
 
     def test_process_messages_max_concurrent_downloads(self):
         """Test that max_concurrent_downloads semaphore limits parallel execution."""
@@ -1353,16 +1366,17 @@ class MediaDownloaderTestCase(unittest.TestCase):
         import media_downloader
 
         client = MockClient()
-        for bad_val in [None, "auto", 0, -1]:
-            chat_conf = {"chat_id": 444, "max_concurrent_downloads": bad_val}
-            media_downloader.DOWNLOADED_IDS[444] = []
-            media_downloader.FAILED_IDS[444] = []
-            # Should not raise
-            self.loop.run_until_complete(
-                media_downloader.process_chat(
-                    client, {"api_id": 1, "api_hash": "a"}, chat_conf, 1, asyncio.Lock()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            for bad_val in [None, "auto", 0, -1]:
+                chat_conf = {"chat_id": 444, "max_concurrent_downloads": bad_val}
+                media_downloader.DOWNLOADED_IDS[444] = []
+                media_downloader.FAILED_IDS[444] = []
+                # Should not raise
+                self.loop.run_until_complete(
+                    process_chat(
+                        client, {"api_id": 1, "api_hash": "a", "download_directory": tmp_dir}, chat_conf, 1, asyncio.Lock()
+                    )
                 )
-            )
 
     def test_update_config_append_failed_ids(self):
         conf = {"chats": [{"chat_id": 12345, "ids_to_retry": [10, 20]}]}
@@ -1824,6 +1838,40 @@ class MediaDownloaderTestCase(unittest.TestCase):
             self.assertEqual(result, 204)
             # The incomplete file must have been deleted so it doesn't cause -copy1 next time
             self.assertFalse(os.path.exists(target_path))
+
+    @mock.patch("media_downloader.update_config", return_value=None)
+    @mock.patch("media_downloader.process_messages", return_value=1234)
+    def test_process_chat_downloads_into_subfolder(self, mock_process_messages, mock_update_config):
+        """Test that process_chat creates chat downloads inside the root downloads subfolder."""
+        client = MockClient()
+        with tempfile.TemporaryDirectory() as base_tmp:
+            with mock.patch("media_downloader.THIS_DIR", base_tmp):
+                # 1. Default root download directory: should resolve under base_tmp/all_downloads/my_chat
+                conf = {"api_id": 1, "api_hash": "a", "download_directory": None}
+                chat_conf = {"chat_id": 555, "download_directory": "my_chat", "max_messages": 0}
+                self.loop.run_until_complete(
+                    process_chat(client, conf, chat_conf, 1, asyncio.Lock())
+                )
+                expected_dir = os.path.join(base_tmp, "all_downloads", "my_chat")
+                self.assertTrue(os.path.isdir(expected_dir))
+
+                # 2. Custom global root download directory
+                custom_root = os.path.join(base_tmp, "custom_root")
+                conf2 = {"api_id": 1, "api_hash": "a", "download_directory": custom_root}
+                chat_conf2 = {"chat_id": 666, "download_directory": "channel_two", "max_messages": 0}
+                self.loop.run_until_complete(
+                    process_chat(client, conf2, chat_conf2, 1, asyncio.Lock())
+                )
+                expected_custom_dir = os.path.join(custom_root, "channel_two")
+                self.assertTrue(os.path.isdir(expected_custom_dir))
+
+                # 3. Chat without explicit download_directory defaults to root_downloads/<chat_id>
+                chat_conf3 = {"chat_id": 777, "max_messages": 0}
+                self.loop.run_until_complete(
+                    process_chat(client, conf, chat_conf3, 1, asyncio.Lock())
+                )
+                expected_id_dir = os.path.join(base_tmp, "all_downloads", "777")
+                self.assertTrue(os.path.isdir(expected_id_dir))
 
     @classmethod
     def tearDownClass(cls):

@@ -47,7 +47,7 @@ file_formats:
   - all
 
 #optional
-download_directory: null  # Custom directory path for downloads (absolute or relative)
+download_directory: all_downloads  # Root directory for downloads (default: "all_downloads"). All chat folders are created inside this directory for easy cleanup.
 start_date: null
 end_date: null
 max_messages: null

@@ -168,3 +168,26 @@ To avoid duplicate downloads (`-copy1`, `-copy2`) and prevent broken 0-byte corr
    * Uses 64 KB chunked MD5 hashing (preventing memory exhaustion on multi-GB files) only when files share the exact same byte size.
    * Retains the primary canonical name and eliminates duplicate downloaded copies.
 
+---
+
+## 8. Isolated Downloads Directory & Safe Purge Workflow
+
+To keep code repositories clean and avoid accidental deletion of source code or configs:
+
+1. **Subfolder Isolation (`all_downloads/`):**
+   * All downloads automatically route into a dedicated `all_downloads/` directory (e.g., `all_downloads/edagam_library/`, `all_downloads/tamilayam/`, etc.).
+   * Configurable via the global `download_directory` key in `config.yaml` (default: `"all_downloads"`).
+   * Prevents dozens of downloaded channel directories from cluttering the root code workspace.
+
+2. **Safe Sync & Purge Sequence:**
+   * After downloads finish, sync the entire downloads directory to remote storage:
+     ```bash
+     rsync -arv --info=progress2 /home/shrini/telegram/multi_downloader/all_downloads/ st34220@69.10.39.2:/home/st34220/public_html/kaniyam-ftp/telegram/
+     ```
+   * Once synced, wipe all downloaded files safely with a single command:
+     ```bash
+     rm -rf /home/shrini/telegram/multi_downloader/all_downloads/*
+     ```
+   * Code, `.git`, `config.yaml`, and `downloads.sqlite3` are untouched and 100% safe.
+
+

@@ -32,9 +32,10 @@ A meta of last read/downloaded message is stored in the config file so that in s
 
 This repository includes specialized tools developed for large-scale digital cultural preservation (contemporary Tamil newspapers, books, and magazines):
 
-* **[Private Archive & Metadata Catalog Guide](docs/PRIVATE_ARCHIVE_AND_CATALOG.md)**: Details on the Two-Tier architecture (Private Dark Archive + Public Metadata Catalog), web leak prevention, and Dublin Core bibliographic standards.
+* **[Private Archive & Metadata Catalog Guide](docs/PRIVATE_ARCHIVE_AND_CATALOG.md)**: Details on the Two-Tier architecture (Private Dark Archive + Public Metadata Catalog), web leak prevention, Dublin Core bibliographic standards, 4-tier deduplication, and the `all_downloads/` isolation & purge workflow.
 * **[Remote Storage Cost & Architecture Guide](server-pricing.md)**: Comprehensive comparison of storage costs (InterServer, Hetzner Storage Box, ServaRICA, AWS S3 Glacier Deep Archive) and scaling roadmaps from 2 TB to 50 TB+.
 * **`build_catalog.py`**: High-performance extraction pipeline that cleans filenames, parses dates and publications, builds an SQLite FTS5 search index, and exports `catalog_data.json` (95,919 reading assets) and `catalog_preview.html`.
+* **Isolated `all_downloads/` Structure**: Downloaded channel folders automatically route into `all_downloads/` (e.g. `all_downloads/edagam_library/`, `all_downloads/tamilayam/`), keeping code repositories completely clean and enabling 1-command safe purges (`rm -rf all_downloads/*`) after syncing to remote servers.
 
 ## 🎉 Version 3.4.0 - Interactive Web UI
 
